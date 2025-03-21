@@ -1,0 +1,134 @@
+import requests
+import time
+import hmac
+import hashlib
+
+# 🔑 Bybit API Credentials
+API_KEY = "your_api_key"
+API_SECRET = "your_api_secret"
+BASE_URL = "https://api.bybit.com"  # Use "https://api-testnet.bybit.com" for testing
+
+# 📌 Generate API Signature
+def generate_signature(params):
+    sorted_params = "&".join(f"{key}={params[key]}" for key in sorted(params.keys()))
+    return hmac.new(API_SECRET.encode(), sorted_params.encode(), hashlib.sha256).hexdigest()
+
+# 📌 Get Market Price
+def get_price(symbol="BTCUSDT"):
+    url = f"{BASE_URL}/v2/public/tickers"
+    response = requests.get(url, params={"symbol": symbol})
+    return float(response.json()['result'][0]['last_price'])
+
+# 📌 Get Historical Prices for TA (last 50 candles)
+def get_historical_prices(symbol="BTCUSDT", interval="60", limit=50):
+    url = f"{BASE_URL}/v2/public/kline/list"
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    response = requests.get(url, params=params).json()
+    return [float(candle["close"]) for candle in response["result"]]
+
+# 📌 Simple Moving Average (SMA)
+def calculate_sma(prices, period=14):
+    if len(prices) < period:
+        return None
+    return sum(prices[-period:]) / period
+
+# 📌 Relative Strength Index (RSI)
+def calculate_rsi(prices, period=14):
+    if len(prices) < period:
+        return None
+    gains = [prices[i] - prices[i-1] for i in range(1, len(prices)) if prices[i] > prices[i-1]]
+    losses = [-1 * (prices[i] - prices[i-1]) for i in range(1, len(prices)) if prices[i] < prices[i-1]]
+    
+    avg_gain = sum(gains[-period:]) / period if len(gains) >= period else 1
+    avg_loss = sum(losses[-period:]) / period if len(losses) >= period else 1
+    
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+# 📌 Average True Range (ATR) - Measures Volatility
+def calculate_atr(prices, period=14):
+    if len(prices) < period:
+        return None
+    return sum(abs(prices[i] - prices[i-1]) for i in range(1, len(prices))) / period
+
+# 📌 Place Market Order
+def place_order(side, qty, symbol="BTCUSDT"):
+    url = f"{BASE_URL}/v2/private/order/create"
+    params = {
+        "api_key": API_KEY,
+        "symbol": symbol,
+        "side": side,
+        "order_type": "Market",
+        "qty": qty,
+        "time_in_force": "GoodTillCancel",
+        "timestamp": int(time.time() * 1000),
+    }
+    params["sign"] = generate_signature(params)
+    response = requests.post(url, data=params)
+    return response.json()
+
+# 📌 Risk Management - Stop-Loss & Take-Profit Calculation
+def risk_management(entry_price, atr, risk_factor=2):
+    stop_loss = entry_price - (atr * risk_factor)  # SL below ATR (Volatility-based)
+    take_profit = entry_price + (atr * risk_factor * 2)  # TP at 2x risk
+    return stop_loss, take_profit
+
+# 📌 Advanced Trading Strategy
+def trade_bot(symbol="BTCUSDT", qty=0.001, sma_period=14, rsi_period=14, atr_period=14):
+    while True:
+        try:
+            prices = get_historical_prices(symbol)
+            if len(prices) < sma_period:
+                print("Not enough data, waiting...")
+                time.sleep(60)
+                continue
+
+            # 📈 Compute Technical Indicators
+            sma = calculate_sma(prices, sma_period)
+            rsi = calculate_rsi(prices, rsi_period)
+            atr = calculate_atr(prices, atr_period)
+            current_price = get_price(symbol)
+
+            print(f"📊 Current Price: {current_price} | SMA: {sma} | RSI: {rsi} | ATR: {atr}")
+
+            # 📌 Buy Condition: Price < SMA & RSI < 30 (Oversold)
+            if current_price < sma and rsi < 30:
+                print(f"🟢 Buying {symbol} at {current_price}")
+                place_order("Buy", qty, symbol)
+
+                # 📌 Set Stop-Loss & Take-Profit
+                stop_loss, take_profit = risk_management(current_price, atr)
+                print(f"🔹 Stop-Loss: {stop_loss}, Take-Profit: {take_profit}")
+
+                # Monitor Price to Sell
+                while True:
+                    new_price = get_price(symbol)
+                    print(f"🔄 Monitoring | Price: {new_price}")
+
+                    if new_price <= stop_loss:
+                        print(f"🔴 Stop-Loss Hit! Selling at {new_price}")
+                        place_order("Sell", qty, symbol)
+                        break
+                    elif new_price >= take_profit:
+                        print(f"🟢 Take-Profit Hit! Selling at {new_price}")
+                        place_order("Sell", qty, symbol)
+                        break
+
+                    time.sleep(10)
+
+            # 📌 Sell Condition: Price > SMA & RSI > 70 (Overbought)
+            elif current_price > sma and rsi > 70:
+                print(f"🔴 Selling {symbol} at {current_price}")
+                place_order("Sell", qty, symbol)
+
+            else:
+                print("⏳ No trade signal. Waiting...")
+            
+            time.sleep(60)  # Run every 1 minute
+
+        except Exception as e:
+            print(f"⚠️ Error: {e}")
+            time.sleep(10)
+
+# 🚀 Start the Bot
+trade_bot(
